@@ -10,7 +10,7 @@ export type RowsBySheet = Record<string, Row[]>;
 export type Role = "pitcher" | "hitter";
 
 export type Series = {
-  label: string;   // UI label
+  label: string;   // UI label for dropdown
   key: string;     // Excel header key (/Calc/...)
   values: number[];
 };
@@ -27,80 +27,8 @@ export type NeededParseResult =
   | ({ ok: false; warnings: string[]; why: string });
 
 /* ============================================================
-   Public API — existing helpers (kept, so other imports don't break)
+   Mappings (authoritative)
 ============================================================ */
-
-/** Parse a File chosen via <input> — returns *all* sheets (legacy). */
-export async function parseExcelToDataSets(
-  file: File,
-  fpsGuess = 120
-): Promise<RowsBySheet> {
-  const buf = await file.arrayBuffer();
-  return parseWorkbookArrayBuffer(buf, fpsGuess);
-}
-
-/** Parse an Excel from a URL — returns *all* sheets (legacy). */
-export async function parseExcelUrlToDataSets(
-  url: string,
-  fpsGuess = 120
-): Promise<RowsBySheet> {
-  const href = new URL(url, (import.meta as any).env?.BASE_URL ?? "/").toString();
-  const res = await fetch(href);
-  if (!res.ok) throw new Error(`Failed to fetch Excel: ${res.status} ${res.statusText}`);
-  const buf = await res.arrayBuffer();
-  return parseWorkbookArrayBuffer(buf, fpsGuess);
-}
-
-/** Core legacy parser: all sheets → rows. */
-export function parseWorkbookArrayBuffer(
-  buf: ArrayBuffer,
-  fpsGuess = 120
-): RowsBySheet {
-  const wb = read(buf, { type: "array" });
-  const out: RowsBySheet = {};
-
-  for (const sheetName of wb.SheetNames) {
-    const ws = wb.Sheets[sheetName];
-    if (!ws) continue;
-
-    const table: any[][] = utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
-    if (!Array.isArray(table) || table.length === 0) continue;
-
-    const { headers, dataRows } = detectHeaderAndExtract(table);
-    if (!headers.length || dataRows.length === 0) continue;
-
-    const rowsRaw = toObjects(headers, dataRows);
-    const cleaned = normalizeSheet(rowsRaw, fpsGuess);
-    if (cleaned.length && cleaned.some((r) => Object.keys(r).some((k) => k !== "t"))) {
-      out[sheetName] = cleaned;
-    }
-  }
-  return out;
-}
-
-/** Legacy single-sheet helper (kept). */
-export async function parseExcelToRows(
-  file: File,
-  fpsGuess = 120
-): Promise<Row[]> {
-  const sets = await parseExcelToDataSets(file, fpsGuess);
-  const names = Object.keys(sets);
-  const pref =
-    names.find((n) => /baseball/i.test(n)) ??
-    names.find((n) => /positions|velocity/i.test(n)) ??
-    names.find((n) => /signal|data|sheet1/i.test(n)) ??
-    names[0];
-  return pref ? sets[pref] : [];
-}
-
-/* ============================================================
-   NEW — Needed metrics (filtered) + diagnostics
-   - Builds ONLY two "virtual sheets":
-     1) Pitcher Measurements Needed
-     2) Hitter Measurements Needed
-============================================================ */
-
-/** Inline mapping so we don't depend on extra JSON or path aliases. */
 const NEEDED_MAP: Record<Role, Array<[label: string, key: string]>> = {
   pitcher: [
     ["Pelvis Twist Velocity", "/Calc/Pelvis/Twist/Velocity_x"],
@@ -136,7 +64,7 @@ const NEEDED_MAP: Record<Role, Array<[label: string, key: string]>> = {
   ]
 };
 
-/** Header variants/typos → canonical keys found in your exports. */
+// header variants/typos → canonical
 const HEADER_ALIASES = new Map<string, string>([
   ["/Calc/Elbow/Dominant/Flexion/Extension/Velocity_x", "/Calc/Elbow/Dominant/FlexionExtension/Velocity_x"],
   ["/Calc/Elbow/Dominant/Flexion/Extenstion/Velocity_x", "/Calc/Elbow/Dominant/FlexionExtension/Velocity_x"],
@@ -145,27 +73,65 @@ const HEADER_ALIASES = new Map<string, string>([
   ["/Calc/Knee/Lead/Flexion/Extension_x", "/Calc/Knee/Lead/FlexionExtension_x"]
 ]);
 
-/** Safe wrapper: never throws (returns ok:false + warnings). */
-export async function parseExcelToNeededMetrics(file: File): Promise<NeededParseResult> {
-  try {
-    const buf = await file.arrayBuffer();
-    return parseWorkbookToNeededMetrics(buf);
-  } catch (err: any) {
-    console.error("[excel] parseExcelToNeededMetrics error:", err);
-    return { ok: false, why: String(err?.message ?? err), warnings: [] };
-  }
+/* ============================================================
+   PUBLIC API — same names as before, but now FILTERED
+   (So you don't need to touch ThreeView/Graph components.)
+============================================================ */
+
+/** URL → ONLY two virtual sheets (Pitcher/Hitter). */
+export async function parseExcelUrlToDataSets(
+  url: string
+): Promise<RowsBySheet> {
+  const href = new URL(url, (import.meta as any).env?.BASE_URL ?? "/").toString();
+  const res = await fetch(href);
+  if (!res.ok) throw new Error(`Failed to fetch Excel: ${res.status} ${res.statusText}`);
+  const buf = await res.arrayBuffer();
+  return parseWorkbookArrayBufferToNeededSheets(buf);
 }
 
-/** Core needed-metrics parser reading the “Baseball Data” sheet. */
+/** File → ONLY two virtual sheets (Pitcher/Hitter). */
+export async function parseExcelToDataSets(file: File): Promise<RowsBySheet> {
+  const buf = await file.arrayBuffer();
+  return parseWorkbookArrayBufferToNeededSheets(buf);
+}
+
+/** If you ever call this directly, it still returns ALL sheets (legacy). */
+export function parseWorkbookArrayBuffer(buf: ArrayBuffer, fpsGuess = 120): RowsBySheet {
+  const wb = read(buf, { type: "array" });
+  const out: RowsBySheet = {};
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) continue;
+    const table: any[][] = utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
+    if (!Array.isArray(table) || table.length === 0) continue;
+    const { headers, dataRows } = detectHeaderAndExtract(table);
+    if (!headers.length || dataRows.length === 0) continue;
+    const rowsRaw = toObjects(headers, dataRows);
+    const cleaned = normalizeSheet(rowsRaw, fpsGuess);
+    if (cleaned.length && cleaned.some((r) => Object.keys(r).some((k) => k !== "t"))) {
+      out[sheetName] = cleaned;
+    }
+  }
+  return out;
+}
+
+/** Older helper — now prefers the Pitcher virtual sheet. */
+export async function parseExcelToRows(file: File): Promise<Row[]> {
+  const sets = await parseExcelToDataSets(file);
+  return sets["Pitcher Measurements Needed"] ?? Object.values(sets)[0] ?? [];
+}
+
+/* ============================================================
+   CORE: parse needed metrics from the “Baseball Data” sheet
+============================================================ */
+
 export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResult {
   try {
     const wb = read(buf, { type: "array" });
-
     const sheetName =
       wb.SheetNames.find((n) => /baseball.*data/i.test(n)) ??
       wb.SheetNames.find((n) => /baseball/i.test(n)) ??
       wb.SheetNames[0];
-
     if (!sheetName) return { ok: false, why: "No sheets found in workbook.", warnings: [] };
 
     const ws = wb.Sheets[sheetName];
@@ -178,9 +144,7 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     const warnings: string[] = [];
 
     const colIndex = new Map<string, number>();
-    header.forEach((h, i) => {
-      if (typeof h === "string") colIndex.set(h.trim(), i);
-    });
+    header.forEach((h, i) => { if (typeof h === "string") colIndex.set(h.trim(), i); });
 
     const timeIdx = getColIndexWithAliases(colIndex, "Time");
     if (timeIdx < 0) warnings.push("Could not find 'Time' column; times will be NaN.");
@@ -189,29 +153,23 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     const buildRole = (role: Role): NeededMetrics => {
       const spec = NEEDED_MAP[role];
       const series: Series[] = spec.map(([label, key]) => ({ label, key, values: [] }));
-
       for (let r = headerRowIndex + 1; r < table.length; r++) {
         const row = table[r] as any[];
         if (!row || !row.length) continue;
-
         if (role === "pitcher") {
           const t = timeIdx >= 0 ? toNumber(row[timeIdx]) : NaN;
           time.push(Number.isFinite(t) ? t : NaN);
         }
-
         series.forEach((s) => {
           const idx = getColIndexWithAliases(colIndex, s.key);
           const v = idx >= 0 ? toNumber(row[idx]) : NaN;
           s.values.push(Number.isFinite(v) ? v : NaN);
         });
       }
-
-      // Warn about any missing columns
       series.forEach((s) => {
         const idx = getColIndexWithAliases(colIndex, s.key);
         if (idx < 0) warnings.push(`Missing column in sheet: ${s.key}`);
       });
-
       return { time, series };
     };
 
@@ -221,8 +179,8 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     if (!pitcher.series.length && !hitter.series.length) {
       return { ok: false, why: "No needed metrics could be extracted.", warnings };
     }
-
     if (warnings.length) console.warn("[excel] parse warnings:", warnings);
+
     return { ok: true, pitcher, hitter, warnings };
   } catch (err: any) {
     console.error("[excel] parseWorkbookToNeededMetrics error:", err);
@@ -231,9 +189,8 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
 }
 
 /* ============================================================
-   Bridge — return two "virtual sheets" so your existing UI works
+   Bridge — return TWO “virtual sheets” so existing UI works
 ============================================================ */
-
 function metricsToRows(m: NeededMetrics): Row[] {
   const rows: Row[] = [];
   const L = m.time.length;
@@ -245,7 +202,6 @@ function metricsToRows(m: NeededMetrics): Row[] {
   return rows;
 }
 
-/** ArrayBuffer → { "Pitcher Measurements Needed": rows, "Hitter Measurements Needed": rows } */
 export function parseWorkbookArrayBufferToNeededSheets(buf: ArrayBuffer): RowsBySheet {
   const res = parseWorkbookToNeededMetrics(buf);
   if (!res.ok) {
@@ -258,51 +214,29 @@ export function parseWorkbookArrayBufferToNeededSheets(buf: ArrayBuffer): RowsBy
   };
 }
 
-/** URL variant (GitHub Pages-safe path resolution). */
-export async function parseExcelUrlToNeededSheets(url: string): Promise<RowsBySheet> {
-  const href = new URL(url, (import.meta as any).env?.BASE_URL ?? "/").toString();
-  const res = await fetch(href);
-  if (!res.ok) throw new Error(`fetch ${href} → ${res.status}`);
-  const buf = await res.arrayBuffer();
-  return parseWorkbookArrayBufferToNeededSheets(buf);
-}
-
-/** File upload variant. */
-export async function parseExcelToNeededSheets(file: File): Promise<RowsBySheet> {
-  const buf = await file.arrayBuffer();
-  return parseWorkbookArrayBufferToNeededSheets(buf);
-}
-
 /* ============================================================
-   Internals (shared with legacy parser)
+   Internals
 ============================================================ */
-
 function detectHeaderAndExtract(table: any[][]): { headers: string[]; dataRows: any[][] } {
   const scanUpto = Math.min(table.length, 20);
-  let bestIdx = 0;
-  let bestScore = -1;
-
+  let bestIdx = 0, bestScore = -1;
   for (let i = 0; i < scanUpto; i++) {
     const row = table[i] ?? [];
     const nonEmpty = row.filter((c) => typeof c === "string" && c.trim() !== "").length;
-    const hasTime = row.some((c) => typeof c === "string" && /^(t|time|timestamp)$/i.test(String(c).trim()));
+    const hasTime  = row.some((c) => typeof c === "string" && /^(t|time|timestamp)$/i.test(String(c).trim()));
     const hasFrame = row.some((c) => typeof c === "string" && /frame/i.test(String(c).trim()));
     let score = nonEmpty + (hasTime ? 3 : 0) + (hasFrame ? 2 : 0);
     if (nonEmpty <= 1) score -= 3;
     if (score > bestScore) { bestScore = score; bestIdx = i; }
   }
-
   const rawHeaders = (table[bestIdx] ?? []).map((v) => (v == null ? "" : String(v)));
-  const headers = dedupeHeaders(
-    rawHeaders.map((h) => {
-      const s = h.trim();
-      if (/^frame(s)?$/i.test(s)) return "Frame";
-      if (/^timestamp$/i.test(s)) return "Timestamp";
-      if (/^(t|time)$/i.test(s)) return "Time";
-      return s;
-    })
-  );
-
+  const headers = dedupeHeaders(rawHeaders.map((h) => {
+    const s = h.trim();
+    if (/^frame(s)?$/i.test(s)) return "Frame";
+    if (/^timestamp$/i.test(s)) return "Timestamp";
+    if (/^(t|time)$/i.test(s)) return "Time";
+    return s;
+  }));
   const dataRows = table.slice(bestIdx + 1);
   return { headers, dataRows };
 }
@@ -321,8 +255,8 @@ function toObjects(headers: string[], rows: any[][]): any[] {
 function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
   if (!rowsRaw.length) return [];
   const keys = Object.keys(rowsRaw[0] ?? {});
-  const timeKey = keys.find((k) => /^(t|time)$/i.test(k)) || keys.find((k) => /timestamp/i.test(k));
-  const msKey = keys.find((k) => /(ms|millisecond)/i.test(k));
+  const timeKey  = keys.find((k) => /^(t|time)$/i.test(k)) || keys.find((k) => /timestamp/i.test(k));
+  const msKey    = keys.find((k) => /(ms|millisecond)/i.test(k));
   const frameKey = keys.find((k) => /^frame(s)?$/i.test(k) || /frame ?index/i.test(k));
 
   const num = (v: any) => {
@@ -343,31 +277,23 @@ function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
 
   const out: Row[] = [];
   for (let i = 0; i < rowsRaw.length; i++) {
-    const r = rowsRaw[i];
-    const row: Row = {};
-    let tSec = NaN;
-
+    const r = rowsRaw[i]; const row: Row = {}; let tSec = NaN;
     if (timeKey) {
-      const v = r[timeKey];
-      const n = num(v);
+      const v = r[timeKey]; const n = num(v);
       const looksMs = !!msKey || (Number.isFinite(n) && n > 50 && averageDelta(rowsRaw, timeKey) > 10);
       tSec = looksMs ? n / 1000 : n;
     } else if (frameKey) {
-      const f = num(r[frameKey]);
-      const fps = fpsGuess && Number.isFinite(fpsGuess) ? fpsGuess : 120;
+      const f = num(r[frameKey]); const fps = fpsGuess && Number.isFinite(fpsGuess) ? fpsGuess : 120;
       tSec = Number.isFinite(f) ? f / fps : NaN;
     } else if (keys.some((k) => /timestamp/i.test(k))) {
       const k = keys.find((k) => /timestamp/i.test(k))!;
       const p = typeof r[k] === "number" ? (r[k] as number) : Date.parse(String(r[k]));
       tSec = Number.isFinite(p) ? (p - ts0) / 1000 : NaN;
     }
-
     row.t = tSec;
-
     for (const k of keys) {
       if (k === timeKey || k === msKey || k === frameKey) continue;
-      const n = num(r[k]);
-      if (Number.isFinite(n)) row[k] = n;
+      const n = num(r[k]); if (Number.isFinite(n)) row[k] = n;
     }
     out.push(row);
   }
@@ -377,13 +303,11 @@ function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
 function averageDelta(rows: any[], key: string): number {
   const vals: number[] = [];
   for (const r of rows) {
-    const x = r[key];
-    const n = typeof x === "number" ? x : Number(x);
+    const x = r[key]; const n = typeof x === "number" ? x : Number(x);
     if (Number.isFinite(n)) vals.push(n);
   }
   if (vals.length < 2) return NaN;
-  let sum = 0;
-  for (let i = 1; i < vals.length; i++) sum += Math.abs(vals[i] - vals[i - 1]);
+  let sum = 0; for (let i = 1; i < vals.length; i++) sum += Math.abs(vals[i] - vals[i - 1]);
   return sum / (vals.length - 1);
 }
 
@@ -413,8 +337,7 @@ function dedupeHeaders(headers: string[]): string[] {
   const seen = new Map<string, number>();
   return headers.map((h) => {
     if (!h) return h;
-    const base = h;
-    const count = (seen.get(base) ?? 0) + 1;
+    const base = h; const count = (seen.get(base) ?? 0) + 1;
     seen.set(base, count);
     return count === 1 ? base : `${base} (${count})`;
   });
