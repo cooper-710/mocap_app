@@ -1,9 +1,7 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-
-const base = process.env.BASE_PATH || "/";
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
-  base,
   plugins: [react()],
-});
+  base: '/mocap_app/',     // <-- MUST match the GH Pages subpath
+})
