@@ -6,7 +6,7 @@ import * as THREE from "three";
 import FBXModel from "./FBXModel";
 import SimpleGraph from "./SimpleGraph";
 import GraphHoloPanel from "./GraphHoloPanel";
-import { parseExcelUrlToNeededSheets, parseExcelToNeededSheets } from "./utils/excel";
+import { parseExcelUrlToDataSets, parseExcelToDataSets } from "./utils/excel";
 import type { RowsBySheet } from "../utils/excel";
 
 /* ------------------------------------------------------------------ */
