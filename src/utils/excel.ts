@@ -1,9 +1,7 @@
 // src/utils/excel.ts
 import { read, utils } from "xlsx";
 
-/* ============================================================
-   Types
-============================================================ */
+/* ============================ Types ============================ */
 export type Row = Record<string, number>;
 export type RowsBySheet = Record<string, Row[]>;
 
@@ -26,9 +24,7 @@ export type NeededParseResult =
   | ({ ok: true } & NeededMetricsByRole & { warnings: string[] })
   | ({ ok: false; warnings: string[]; why: string });
 
-/* ============================================================
-   Mappings (authoritative)
-============================================================ */
+/* =============== Allowlist mapping (authoritative) =============== */
 const NEEDED_MAP: Record<Role, Array<[label: string, key: string]>> = {
   pitcher: [
     ["Pelvis Twist Velocity", "/Calc/Pelvis/Twist/Velocity_x"],
@@ -64,7 +60,7 @@ const NEEDED_MAP: Record<Role, Array<[label: string, key: string]>> = {
   ]
 };
 
-// header variants/typos → canonical
+/* Some exports have spelling/format variants; map them to canonical keys */
 const HEADER_ALIASES = new Map<string, string>([
   ["/Calc/Elbow/Dominant/Flexion/Extension/Velocity_x", "/Calc/Elbow/Dominant/FlexionExtension/Velocity_x"],
   ["/Calc/Elbow/Dominant/Flexion/Extenstion/Velocity_x", "/Calc/Elbow/Dominant/FlexionExtension/Velocity_x"],
@@ -73,39 +69,35 @@ const HEADER_ALIASES = new Map<string, string>([
   ["/Calc/Knee/Lead/Flexion/Extension_x", "/Calc/Knee/Lead/FlexionExtension_x"]
 ]);
 
-/* ============================================================
-   PUBLIC API — same names as before, but now FILTERED
-   (So you don't need to touch ThreeView/Graph components.)
-============================================================ */
+/* ===================== PUBLIC API (same names) ===================== */
+/** Parse a File chosen via <input>. Returns ONLY the two virtual sheets. */
+export async function parseExcelToDataSets(file: File, _fpsGuess = 120): Promise<RowsBySheet> {
+  const buf = await file.arrayBuffer();
+  return parseWorkbookArrayBufferToNeededSheets(buf);
+}
 
-/** URL → ONLY two virtual sheets (Pitcher/Hitter). */
-export async function parseExcelUrlToDataSets(
-  url: string
-): Promise<RowsBySheet> {
-  const href = new URL(url, (import.meta as any).env?.BASE_URL ?? "/").toString();
-  const res = await fetch(href);
+/** Parse an Excel fetched from a URL. Returns ONLY the two virtual sheets. */
+export async function parseExcelUrlToDataSets(url: string, _fpsGuess = 120): Promise<RowsBySheet> {
+  const res = await fetch(url);               // ⬅️ no base/path changes here
   if (!res.ok) throw new Error(`Failed to fetch Excel: ${res.status} ${res.statusText}`);
   const buf = await res.arrayBuffer();
   return parseWorkbookArrayBufferToNeededSheets(buf);
 }
 
-/** File → ONLY two virtual sheets (Pitcher/Hitter). */
-export async function parseExcelToDataSets(file: File): Promise<RowsBySheet> {
-  const buf = await file.arrayBuffer();
-  return parseWorkbookArrayBufferToNeededSheets(buf);
-}
-
-/** If you ever call this directly, it still returns ALL sheets (legacy). */
+/** Legacy core (kept)—if someone calls this directly, we still return ALL sheets. */
 export function parseWorkbookArrayBuffer(buf: ArrayBuffer, fpsGuess = 120): RowsBySheet {
   const wb = read(buf, { type: "array" });
   const out: RowsBySheet = {};
   for (const sheetName of wb.SheetNames) {
     const ws = wb.Sheets[sheetName];
     if (!ws) continue;
+
     const table: any[][] = utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
     if (!Array.isArray(table) || table.length === 0) continue;
+
     const { headers, dataRows } = detectHeaderAndExtract(table);
     if (!headers.length || dataRows.length === 0) continue;
+
     const rowsRaw = toObjects(headers, dataRows);
     const cleaned = normalizeSheet(rowsRaw, fpsGuess);
     if (cleaned.length && cleaned.some((r) => Object.keys(r).some((k) => k !== "t"))) {
@@ -115,16 +107,13 @@ export function parseWorkbookArrayBuffer(buf: ArrayBuffer, fpsGuess = 120): Rows
   return out;
 }
 
-/** Older helper — now prefers the Pitcher virtual sheet. */
-export async function parseExcelToRows(file: File): Promise<Row[]> {
+/** Legacy helper kept; now prefers the Pitcher virtual sheet. */
+export async function parseExcelToRows(file: File, _fpsGuess = 120): Promise<Row[]> {
   const sets = await parseExcelToDataSets(file);
   return sets["Pitcher Measurements Needed"] ?? Object.values(sets)[0] ?? [];
 }
 
-/* ============================================================
-   CORE: parse needed metrics from the “Baseball Data” sheet
-============================================================ */
-
+/* =================== Filtered processing core =================== */
 export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResult {
   try {
     const wb = read(buf, { type: "array" });
@@ -132,6 +121,7 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
       wb.SheetNames.find((n) => /baseball.*data/i.test(n)) ??
       wb.SheetNames.find((n) => /baseball/i.test(n)) ??
       wb.SheetNames[0];
+
     if (!sheetName) return { ok: false, why: "No sheets found in workbook.", warnings: [] };
 
     const ws = wb.Sheets[sheetName];
@@ -141,11 +131,10 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     if (!table.length) return { ok: false, why: `Sheet '${sheetName}' has no data.`, warnings: [] };
 
     const { headerRowIndex, header } = findHeaderRowWithTime(table);
-    const warnings: string[] = [];
-
     const colIndex = new Map<string, number>();
     header.forEach((h, i) => { if (typeof h === "string") colIndex.set(h.trim(), i); });
 
+    const warnings: string[] = [];
     const timeIdx = getColIndexWithAliases(colIndex, "Time");
     if (timeIdx < 0) warnings.push("Could not find 'Time' column; times will be NaN.");
 
@@ -153,23 +142,29 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     const buildRole = (role: Role): NeededMetrics => {
       const spec = NEEDED_MAP[role];
       const series: Series[] = spec.map(([label, key]) => ({ label, key, values: [] }));
+
       for (let r = headerRowIndex + 1; r < table.length; r++) {
         const row = table[r] as any[];
         if (!row || !row.length) continue;
+
         if (role === "pitcher") {
           const t = timeIdx >= 0 ? toNumber(row[timeIdx]) : NaN;
           time.push(Number.isFinite(t) ? t : NaN);
         }
+
         series.forEach((s) => {
           const idx = getColIndexWithAliases(colIndex, s.key);
           const v = idx >= 0 ? toNumber(row[idx]) : NaN;
           s.values.push(Number.isFinite(v) ? v : NaN);
         });
       }
+
+      // Warn about any missing columns (will just be NaN series)
       series.forEach((s) => {
         const idx = getColIndexWithAliases(colIndex, s.key);
         if (idx < 0) warnings.push(`Missing column in sheet: ${s.key}`);
       });
+
       return { time, series };
     };
 
@@ -179,8 +174,8 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
     if (!pitcher.series.length && !hitter.series.length) {
       return { ok: false, why: "No needed metrics could be extracted.", warnings };
     }
-    if (warnings.length) console.warn("[excel] parse warnings:", warnings);
 
+    if (warnings.length) console.warn("[excel] parse warnings:", warnings);
     return { ok: true, pitcher, hitter, warnings };
   } catch (err: any) {
     console.error("[excel] parseWorkbookToNeededMetrics error:", err);
@@ -188,9 +183,7 @@ export function parseWorkbookToNeededMetrics(buf: ArrayBuffer): NeededParseResul
   }
 }
 
-/* ============================================================
-   Bridge — return TWO “virtual sheets” so existing UI works
-============================================================ */
+/* ============ Bridge: emit TWO virtual sheets only ============ */
 function metricsToRows(m: NeededMetrics): Row[] {
   const rows: Row[] = [];
   const L = m.time.length;
@@ -214,9 +207,7 @@ export function parseWorkbookArrayBufferToNeededSheets(buf: ArrayBuffer): RowsBy
   };
 }
 
-/* ============================================================
-   Internals
-============================================================ */
+/* ===================== Internals (legacy helpers) ===================== */
 function detectHeaderAndExtract(table: any[][]): { headers: string[]; dataRows: any[][] } {
   const scanUpto = Math.min(table.length, 20);
   let bestIdx = 0, bestScore = -1;
@@ -278,6 +269,7 @@ function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
   const out: Row[] = [];
   for (let i = 0; i < rowsRaw.length; i++) {
     const r = rowsRaw[i]; const row: Row = {}; let tSec = NaN;
+
     if (timeKey) {
       const v = r[timeKey]; const n = num(v);
       const looksMs = !!msKey || (Number.isFinite(n) && n > 50 && averageDelta(rowsRaw, timeKey) > 10);
@@ -290,6 +282,7 @@ function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
       const p = typeof r[k] === "number" ? (r[k] as number) : Date.parse(String(r[k]));
       tSec = Number.isFinite(p) ? (p - ts0) / 1000 : NaN;
     }
+
     row.t = tSec;
     for (const k of keys) {
       if (k === timeKey || k === msKey || k === frameKey) continue;
@@ -303,7 +296,8 @@ function normalizeSheet(rowsRaw: any[], fpsGuess: number): Row[] {
 function averageDelta(rows: any[], key: string): number {
   const vals: number[] = [];
   for (const r of rows) {
-    const x = r[key]; const n = typeof x === "number" ? x : Number(x);
+    const x = r[key];
+    const n = typeof x === "number" ? x : Number(x);
     if (Number.isFinite(n)) vals.push(n);
   }
   if (vals.length < 2) return NaN;
